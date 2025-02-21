@@ -1,0 +1,312 @@
+#
+# Copyright 2021 The Sigstore Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+swagger: "2.0"
+info:
+  title: Rekor
+  description: Rekor is a cryptographically secure, immutable transparency log for signed software releases.
+  version: 1.0.0
+
+host: rekor.sigstore.dev
+schemes:
+  - http
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+paths:
+  /api/v1/log:
+    get:
+      summary: Get information about the current state of the transparency log
+      description: Returns the current root hash and size of the merkle tree used to store the log entries.
+      operationId: getLogInfo
+      tags:
+        - tlog
+      parameters:
+        - in: query
+          name: stable
+          type: boolean
+          default: false
+          description: Whether to return a stable checkpoint for the active shard
+      responses:
+        200:
+          description: A JSON object with the root hash and tree size as properties
+          schema:
+            $ref: '#/definitions/LogInfo'
+        default:
+          $ref: '#/responses/InternalServerError'
+
+  /api/v1/log/publicKey:
+    get:
+      summary: Retrieve the public key that can be used to validate the signed tree head
+      description: Returns the public key that can be used to validate the signed tree head
+      operationId: getPublicKey
+      tags:
+        - pubkey
+      parameters:
+        - in: query
+          name: treeID
+          type: string
+          pattern: '^[0-9]+$'
+          description: The tree ID of the tree you wish to get a public key for
+      produces:
+        - application/x-pem-file
+      responses:
+        200:
+          description: The public key
+          schema:
+            type: string
+        default:
+          $ref: '#/responses/InternalServerError'
+
+  /api/v1/log/entries:
+    post:
+      summary: Creates an entry in the transparency log
+      description: >
+        Creates an entry in the transparency log for a detached signature, public key, and content.
+        Items can be included in the request or fetched by the server when URLs are specified.
+      operationId: createLogEntry
+      tags:
+        - entries
+      parameters:
+        - in: body
+          name: proposedEntry
+          schema:
+            $ref: '#/definitions/ProposedEntry'
+          required: true
+      responses:
+        201:
+          description: Returns the entry created in the transparency log
+          headers:
+            ETag:
+              type: string
+              description: UUID of log entry
+            Location:
+              type: string
+              description: URI location of log entry
+              format: uri
+          schema:
+            $ref: '#/definitions/LogEntry'
+        400:
+          $ref: '#/responses/BadContent'
+        409:
+          $ref: '#/responses/Conflict'
+        default:
+          $ref: '#/responses/InternalServerError'
+
+definitions:
+  ProposedEntry:
+    type: object
+    discriminator: kind
+    properties:
+      kind:
+        type: string
+    required:
+      - kind
+
+  hashedrekord:
+    type: object
+    description: Hashed Rekord object
+    allOf:
+    - $ref: '#/definitions/ProposedEntry'
+    - properties:
+        apiVersion:
+          type: string
+          pattern: ^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$
+        spec:
+          type: object
+          $ref: 'pkg/types/hashedrekord/hashedrekord_schema.json'
+      required:
+        - apiVersion
+        - spec
+      additionalProperties: false
+
+  dsse:
+    type: object
+    description: DSSE envelope
+    allOf:
+    - $ref: '#/definitions/ProposedEntry'
+    - properties:
+        apiVersion:
+          type: string
+          pattern: ^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$
+        spec:
+          type: object
+          $ref: 'pkg/types/dsse/dsse_schema.json'
+      required:
+        - apiVersion
+        - spec
+      additionalProperties: false
+
+  LogEntry:
+    type: object
+    additionalProperties:
+      type: object
+      properties:
+        logID:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: This is the SHA256 hash of the DER-encoded public key for the log at the time the entry was included in the log
+        logIndex:
+          type: integer
+          minimum: 0
+        body:
+          type: object
+          additionalProperties: true
+        integratedTime:
+          type: integer
+          description: The time the entry was added to the log as a Unix timestamp in seconds
+        attestation:
+          type: object
+          properties:
+            data:
+              format: byte
+
+          format: byte
+        verification:
+          type: object
+          properties:
+            inclusionProof:
+              $ref: '#/definitions/InclusionProof'
+            signedEntryTimestamp:
+              type: string
+              format: byte
+              # To verify the signedEntryTimestamp:
+                # 1. Remove the Verification object from the JSON Document
+                # 2. Canonicalize the remaining JSON document by following RFC 8785 rules
+                # 3. Verify the canonicalized payload and signedEntryTimestamp against rekor's public key
+              description: Signature over the logID, logIndex, body and integratedTime.
+      required:
+        - "logID"
+        - "logIndex"
+        - "body"
+        - "integratedTime"
+
+  LogInfo:
+    type: object
+    properties:
+      rootHash:
+        type: string
+        description: The current hash value stored at the root of the merkle tree
+        pattern: '^[0-9a-fA-F]{64}$'
+      treeSize:
+        type: integer
+        description: The current number of nodes in the merkle tree
+        minimum: 1
+      signedTreeHead:
+        type: string
+        format: signedCheckpoint
+        description: The current signed tree head
+      treeID:
+        type: string
+        description: The current treeID
+        pattern: '^[0-9]+$'
+      inactiveShards:
+        type: array
+        items:
+          $ref: '#/definitions/InactiveShardLogInfo'
+
+    required:
+      - rootHash
+      - treeSize
+      - signedTreeHead
+      - treeID
+  InactiveShardLogInfo:
+    type: object
+    properties:
+      rootHash:
+        type: string
+        description: The current hash value stored at the root of the merkle tree
+        pattern: '^[0-9a-fA-F]{64}$'
+      treeSize:
+        type: integer
+        description: The current number of nodes in the merkle tree
+        minimum: 1
+      signedTreeHead:
+        type: string
+        format: signedCheckpoint
+        description: The current signed tree head
+      treeID:
+        type: string
+        description: The current treeID
+        pattern: '^[0-9]+$'
+    required:
+      - rootHash
+      - treeSize
+      - signedTreeHead
+      - treeID
+
+  InclusionProof:
+    type: object
+    properties:
+      logIndex:
+        type: integer
+        description: The index of the entry in the transparency log
+        minimum: 0
+      rootHash:
+        description: The hash value stored at the root of the merkle tree at the time the proof was generated
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+      treeSize:
+        type: integer
+        description: The size of the merkle tree at the time the inclusion proof was generated
+        minimum: 1
+      hashes:
+        description: A list of hashes required to compute the inclusion proof, sorted in order from leaf to root
+        type: array
+        items:
+          type: string
+          description: SHA256 hash value expressed in hexadecimal format
+          pattern: '^[0-9a-fA-F]{64}$'
+      checkpoint:
+        type: string
+        format: signedCheckpoint
+        description: The checkpoint (signed tree head) that the inclusion proof is based on
+    required:
+      - logIndex
+      - rootHash
+      - treeSize
+      - hashes
+      - checkpoint
+
+  Error:
+    type: object
+    properties:
+      code:
+        type: integer
+      message:
+        type: string
+
+responses:
+  BadContent:
+    description: The content supplied to the server was invalid
+    schema:
+      $ref: "#/definitions/Error"
+  Conflict:
+    description: The request conflicts with the current state of the transparency log
+    schema:
+      $ref: "#/definitions/Error"
+    headers:
+      Location:
+        type: string
+        format: uri
+  NotFound:
+    description: The content requested could not be found
+  InternalServerError:
+    description: There was an internal error in the server while processing the request
+    schema:
+      $ref: "#/definitions/Error"
